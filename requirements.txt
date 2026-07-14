@@ -7,3 +7,9 @@ pyyaml
 torch
 scikit-learn
 joblib
+ultralytics
+cv-bridge
+huggingface_hub
+ipywidgets
+sapien>=3.0.0.b1
+hampel

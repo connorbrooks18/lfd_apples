@@ -2,7 +2,6 @@ import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.task import Future
-from rclpy.executors import MultiThreadedExecutor  # REQUIRED FOR MULTI-THREADING
 
 from std_msgs.msg import Int16MultiArray, Bool
 from std_srvs.srv import SetBool
@@ -13,9 +12,6 @@ class GripperController(Node):
 
     def __init__(self):
         super().__init__('gripper_controller')
-
-        # Create a Reentrant Callback Group to prevent service deadlocks
-        self.callback_group = ReentrantCallbackGroup()
 
         # Parameters
         self.declare_parameter('distance_threshold', 50)   # mm
@@ -28,96 +24,65 @@ class GripperController(Node):
         
         self.initialize_ros_topics()
         self.initialize_ros_service_clients()        
-        self.initialize_ros_services() 
         self.initialize_flags()
 
-        self.get_logger().info("GripperController node started in MANUAL-ONLY mode (Deadlock Fixed).")
+        self.get_logger().info("GripperController node started.")
         
+
         # Parameters
         self.apple_disposal_coord = [-0.46, 0.47, 0.22]       
         self.disposal_range = 0.05
 
     def initialize_ros_topics(self):
-        # Subscriptions bound to the reentrant callback group
+        
+        # Topic Subscribers
         self.distance_sub = self.create_subscription(
             Int16MultiArray,
             'microROS/sensor_data',
             self.gripper_sensors_callback,
-            10,
-            callback_group=self.callback_group)
+            10)
         self.eef_pose_sub = self.create_subscription(
             PoseStamped,
             '/franka_robot_state_broadcaster/current_pose',
             self.eef_pose_callback,
-            10,
-            callback_group=self.callback_group)
+            10)
         self.probing_apple_sub = self.create_subscription(
             Bool,
             'lfd/apple_probing_apple',
             self.probing_apple_callback,
-            10,
-            callback_group=self.callback_group)
+            10)
         self.pick_done_sub = self.create_subscription(
             Bool,
             'lfd/pick_done',
             self.pick_done_callback,
-            10,
-            callback_group=self.callback_group)
+            10)
+
+
 
     def initialize_ros_service_clients(self):
-        # Service clients bound to the reentrant callback group
-        self.valve_client = self.create_client(
-            SetBool, 'microROS/toggle_valve', callback_group=self.callback_group)
-        self.fingers_client = self.create_client(
-            SetBool, 'microROS/move_stepper', callback_group=self.callback_group)
+        
+        self.valve_client = self.create_client(SetBool, 'microROS/toggle_valve')
+        self.fingers_client = self.create_client(SetBool, 'microROS/move_stepper')
 
         while not self.valve_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().warn('Waiting for valve service...')
         while not self.fingers_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().warn('Waiting for fingers service...')
 
-    def initialize_ros_services(self):
-        # Service server bound to the reentrant callback group
-        self.grab_service = self.create_service(
-            SetBool, 
-            'gripper_grab', 
-            self.gripper_grab_callback,
-            callback_group=self.callback_group
-        )
-        self.get_logger().info("Service server 'gripper_grab' initialized.")
 
     def initialize_flags(self):
+        
         self.flag_distance = False
         self.flag_engagement = False
         self.flag_disposal = False
         self.flag_init = False
-        self.cooldown = False  
+        self.cooldown = False  # NEW: prevents immediate rearming
         self.auto_off_timer = None
         self.flag_probing_apple = False
         self.flag_apple_picked = False
         self.flag_apple_released = False
 
-    # ----------------------- Service Callback (Manual Override) -----------------------
-    def gripper_grab_callback(self, request, response):
-        if request.data:
-            self.get_logger().info("External Service: GRAB Request received. Actuating hardware manually.")
-            
-            # 1. Turn Valve ON immediately
-            req_valve = SetBool.Request()
-            req_valve.data = True
-            self.valve_client.call_async(req_valve)
-            
-            self.grab_delay_timer = self.create_timer(
-                1.0, self._call_fingers_after_grab_delay, callback_group=self.callback_group)
-            response.success = True
-            response.message = "Gripper explicitly instructed to GRAB."
-        else:
-            self.get_logger().info("External Service: RELEASE Request received. Resetting hardware manually.")
-            self.fingers_and_valve_reset()
-            response.success = True
-            response.message = "Gripper explicitly instructed to RELEASE."
 
-        return response
 
     # ----------------------- Helper to safely destroy timers -----------------------
     def destroy_timer_safe(self, attr_name: str):
@@ -130,43 +95,96 @@ class GripperController(Node):
                 self.get_logger().warn(f"Error destroying timer {attr_name}: {e}")
             setattr(self, attr_name, None)
 
-    def _call_fingers_after_grab_delay(self):
-        # Always destroy the one-shot timer immediately so it doesn't loop
-        self.destroy_timer_safe("grab_delay_timer")
-        
-        self.get_logger().info("Delay complete. Extending fingers manually.")
-        
-        # 3. Deploy Fingers
-        req_fingers = SetBool.Request()
-        req_fingers.data = True
-        future_fingers = self.fingers_client.call_async(req_fingers)
-        future_fingers.add_done_callback(self._after_manual_fingers_extended)
-
-    def _after_manual_fingers_extended(self, future_fingers: Future):
-        try:
-            response = future_fingers.result()
-            if response.success:
-                self.get_logger().info("Successful Manual Fingers Out.")
-            else:
-                self.get_logger().warn("Failed Manual Fingers Out.")
-        except Exception as e:
-            self.get_logger().error(f"Manual Fingers Out service call failed: {e}")
-
-    # ----------------------- REMOVED AUTOMATIC LOOPS -----------------------
+    # ----------------------- Main Sensor Callback -----------------------
     def gripper_sensors_callback(self, msg: Int16MultiArray):
-        pass
 
+        if not self.flag_probing_apple:
+
+            if (not self.cooldown) and (not self.flag_init):
+                self.get_logger().info("--- State 0 ---: Initialization: Valve OFF, Fingers IN")
+                self.fingers_and_valve_reset()
+                self.flag_init = True
+
+            # Target close
+            if (not self.cooldown) and (not self.flag_distance) and (0 < msg.data[3] < self.distance_threshold):
+                self.get_logger().info(f"--- State 1 ---: Target close ({msg.data[3]} < {self.distance_threshold}), valve ON")
+                req = SetBool.Request()
+                req.data = True
+                self.valve_client.call_async(req)
+                self.flag_distance = True
+                self.flag_apple_released = False
+
+            # Target moved away
+            elif self.flag_distance and (msg.data[3] > self.distance_threshold):
+                self.get_logger().info(f"--- State 0 ---: Target moved away ({msg.data[3]} > {self.distance_threshold}), resetting gripper")
+                req = SetBool.Request()
+                req.data = False
+                self.valve_client.call_async(req)
+                self.flag_distance = False
+                self.destroy_timer_safe("auto_off_timer")
+
+            # Check pressure → engage fingers & start timer
+            cnt = 0
+            if msg.data[0] < self.pressure_threshold:
+                cnt +=1
+            if msg.data[1] < self.pressure_threshold:
+                cnt +=1
+            if msg.data[2] < self.pressure_threshold:
+                cnt +=1
+
+            if (not self.cooldown) and (not self.flag_engagement) and cnt >1:
+                self.get_logger().info(f"--- State 2 ---: Pressures {msg.data[:3]} < {self.pressure_threshold}, cups engaged, deploying fingers")
+                req = SetBool.Request()
+                req.data = True
+                self.fingers_client.call_async(req)
+                self.flag_engagement = True
+
+                # Start one-shot auto-off timer
+                if self.auto_off_timer is None:
+                    self.get_logger().info(f"Starting auto-off timer ({self.timer_value} s)...")
+                    self.auto_off_timer = self.create_timer(self.timer_value, self.auto_off_callback)
+
+    # ----------------------- Auto-off Timer -----------------------
     def auto_off_callback(self):
-        pass
+        self.get_logger().warn("--- State 3 ---: Auto-off triggered: Turning OFF valve and retracting fingers")
 
+        # Destroy the timer so it only runs once
+        self.destroy_timer_safe("auto_off_timer")
+
+        # Reset system
+        self.fingers_and_valve_reset()
+
+    # ----------------------- Callbacks -----------------------
     def eef_pose_callback(self, msg: PoseStamped):
-        pass
+        eef_x, eef_y, eef_z = msg.pose.position.x, msg.pose.position.y, msg.pose.position.z
+
+        if (not self.cooldown) and (not self.flag_disposal) and (
+            abs(eef_x - self.apple_disposal_coord[0]) < self.disposal_range and
+            abs(eef_y - self.apple_disposal_coord[1]) < self.disposal_range and
+            abs(eef_z - self.apple_disposal_coord[2]) < self.disposal_range
+        ):
+            self.get_logger().info("--- State 3 ---: End-effector in disposal zone.")
+            self.flag_disposal = True
+            self.destroy_timer_safe("auto_off_timer")
+            self.fingers_and_valve_reset()
+
 
     def probing_apple_callback(self, msg: Bool):
+        
         self.flag_probing_apple = msg.data
 
+
     def pick_done_callback(self, msg: Bool):
+
         self.flag_apple_picked = msg.data
+
+        if self.flag_apple_picked and not self.flag_apple_released:
+            self.get_logger().info("Apple was picked")
+            # Reset system
+            self.fingers_and_valve_reset()
+            self.flag_apple_released = True
+
+
 
     # ----------------------- Reset Sequence -----------------------
     def fingers_and_valve_reset(self):
@@ -175,6 +193,7 @@ class GripperController(Node):
         req.data = False
         future_fingers = self.fingers_client.call_async(req)
         future_fingers.add_done_callback(self._after_fingers_call_reset)
+
 
     def _after_fingers_call_reset(self, future_fingers: Future):
         try:
@@ -185,10 +204,8 @@ class GripperController(Node):
                 self.get_logger().warn("Failed Fingers In.")
         except Exception as e:
             self.get_logger().error(f"Fingers In service call failed: {e}")
-        
-        # Explicitly assign timer to the callback group so it can execute concurrently
-        self.delay_timer = self.create_timer(
-            0.5, self._call_valve_after_reset, callback_group=self.callback_group)
+        self.delay_timer = self.create_timer(0.5, self._call_valve_after_reset)
+
 
     def _call_valve_after_reset(self):
         self.destroy_timer_safe("delay_timer")
@@ -196,6 +213,7 @@ class GripperController(Node):
         req_valve.data = False
         future_valve = self.valve_client.call_async(req_valve)
         future_valve.add_done_callback(self._after_valve_call_reset)
+
 
     def _after_valve_call_reset(self, future_valve: Future):
         try:
@@ -206,32 +224,34 @@ class GripperController(Node):
                 self.get_logger().warn("Failed Valve Closed.")
         except Exception as e:
             self.get_logger().error(f"Valve service call failed: {e}")
-            
-        self.delay_reset_timer = self.create_timer(
-            0.5, self._after_reset_complete, callback_group=self.callback_group)
+        self.delay_reset_timer = self.create_timer(0.5, self._after_reset_complete)
+
 
     def _after_reset_complete(self):
         self.destroy_timer_safe("delay_reset_timer")
         self.flag_distance = False
         self.flag_engagement = False        
-        self.get_logger().info("Reset complete. System idle waiting for next client command.")
+        self.destroy_timer_safe("auto_off_timer")
+
+        # NEW: short cooldown to prevent immediate re-triggering
+        self.cooldown = True
+        self.get_logger().info("Cooldown active (2 s)...")
+        self.cooldown_timer = self.create_timer(2.0, self._clear_cooldown)
+
+
+    def _clear_cooldown(self):
+        self.destroy_timer_safe("cooldown_timer")
+        self.cooldown = False
+        self.flag_disposal = False
+        self.get_logger().info("Cooldown cleared, ready for next cycle.")
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = GripperController()
-    
-    # Switch from single-threaded to MultiThreadedExecutor to break the callback block
-    executor = MultiThreadedExecutor()
-    executor.add_node(node)
-    
-    try:
-        executor.spin()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
 
 if __name__ == '__main__':

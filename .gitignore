@@ -12,3 +12,11 @@ lfd_apples/data/*.pkl
 # Cache#
 **/__pycache__/
 *.pyc
+*.log
+log/*
+build/
+log/
+install/
+*/venv/*
+venv/
+venv/bin/proton-viewer

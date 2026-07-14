@@ -25,7 +25,7 @@ setup(
     maintainer_email='velasale@oregonstate.edu',
     description='TODO: Package description',
     license='Apache-2.0',
-    tests_require=['pytest'],
+    #tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'listen_franka = lfd_apples.listen_franka:main',
