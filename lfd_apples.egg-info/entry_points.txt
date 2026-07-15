@@ -1,3 +1,0 @@
-[console_scripts]
-lfd_automatic_gripper = lfd_apples.lfd_automatic_gripper:main
-

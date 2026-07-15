@@ -66,6 +66,7 @@ class GripperController(Node):
 
     def initialize_ros_service_clients(self):
         # Service clients bound to the reentrant callback group
+        print("HELLO\n\n\n")
         self.valve_client = self.create_client(
             SetBool, 'microROS/toggle_valve', callback_group=self.callback_group)
         self.fingers_client = self.create_client(
