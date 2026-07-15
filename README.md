@@ -14,8 +14,6 @@ ros2 launch lfd_apples lfd_gripper.launch.py ssid:=alejos password:=harvesting
 - **Robot:** Franka Research
 - **Gripper:** micro-ROS enabled
 - **ROS2**
-- [Moveit2](https://moveit.ai/install-moveit2/source/)
-
 ---
 
 ## GRIPPER
