@@ -1,3 +1,8 @@
+# THIS FORK INFORMATION
+
+This fork is used just for connecting to the gripper and sending open and grab commands. nothing else.
+
+
 # LFD Apples - Gripper Control
 
 ## Things You'll Need
