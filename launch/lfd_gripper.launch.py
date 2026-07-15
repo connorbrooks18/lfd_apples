@@ -121,10 +121,10 @@ def generate_launch_description():
 
 
         # Twist Smoothing Node
-        Node(
-                package='lfd_apples',
-                executable='lfd_action_smoother_node',
-                name='twist_ramp_node',
-        ),
+        # Node(
+        #         package='lfd_apples',
+        #         executable='lfd_action_smoother_node',
+        #         name='twist_ramp_node',
+        # ),
             
     ])
